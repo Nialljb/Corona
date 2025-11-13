@@ -9,7 +9,7 @@ st.write("Submit Apptainer-based jobs to a Slurm HPC cluster securely over SSH."
 
 # Sidebar
 st.sidebar.header("🔑 Connection Settings")
-hostname = st.sidebar.text_input("Hostname", "login.hpc.example.edu")
+hostname = st.sidebar.text_input("Hostname", "login1.nan.kcl.ac.uk")
 username = st.sidebar.text_input("Username", os.getenv("USER"))
 key_path = st.sidebar.text_input("SSH Key Path", "~/.ssh/id_rsa")
 connect_btn = st.sidebar.button("Connect")
@@ -31,9 +31,9 @@ if client:
     st.divider()
     st.subheader("⚙️ Submit an Apptainer Job")
 
-    image_path = st.text_input("Apptainer Image Path", "/home/nbourke/images/my_gear.sif")
+    image_path = st.text_input("Apptainer Image Path", "/home/k2252514/images/my_Node.sif")
     command = st.text_input("Command to run inside container", "python /app/run_pipeline.py --input data/")
-    work_dir = st.text_input("Working Directory", "/home/nbourke/projects/revamp")
+    work_dir = st.text_input("Working Directory", "/home/k2252514/projects/revamp")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -61,6 +61,27 @@ if client:
                 time=time,
                 output_log=output_log,
             )
+        st.session_state.job_id = job["job_id"]
+        st.success(f"✅ Submitted job {job['job_id']}")
+
+    # -----------------------------
+    # Node / Module selection
+    # -----------------------------
+    st.subheader("⚙️ Run a Node")
+    node = {
+        "Structural Segmentation": "/home/k2252514/nodes/run_segmentation.sh",
+        "DTI Pipeline": "/home/k2252514/nodes/run_dti.sh",
+        "fMRI Preprocessing": "/home/k2252514/nodes/run_fmri.sh",
+        "Hello World": "/home/k2252514/nodes/hello_world.sh",
+    }
+
+    selected_node = st.selectbox("Select a Node to run:", list(node.keys()))
+    project_path = st.text_input("Project Path", "/home/k2252514/projects/remoteTest")
+
+    if st.button("Submit Job"):
+        script = node[selected_node]
+        with st.spinner("Submitting job..."):
+            job = client.submit_job(script, job_name=selected_node.replace(" ", "_"))
         st.session_state.job_id = job["job_id"]
         st.success(f"✅ Submitted job {job['job_id']}")
 

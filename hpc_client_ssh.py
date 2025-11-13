@@ -19,6 +19,7 @@ class HPCSSHClient:
             username=self.username,
             key_filename=self.key_path,
             look_for_keys=True,
+            allow_agent=True,
             timeout=10,
         )
         print(f"Connected to {self.hostname} as {self.username}")
@@ -48,6 +49,12 @@ class HPCSSHClient:
         sftp.get(remote_path, local_path)
         sftp.close()
         print(f"Downloaded {remote_path} → {local_path}")
+
+    def submit_job(self, script_path, job_name="test_job"):
+        """Submit a job to the scheduler (example: Slurm)."""
+        cmd = f"sbatch --job-name={job_name} {script_path}"
+        result = self._run(cmd)
+        return {"job_id": result.split()[-1]}
 
     # --------------------------------------------------------------------
     # Slurm + Apptainer job submission

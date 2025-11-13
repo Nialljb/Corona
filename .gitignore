@@ -1,0 +1,15 @@
+# Python stuff
+__pycache__
+
+# Mac stuff
+.DS_Store
+
+# Editor specific stuff
+.vscode
+.idea/
+
+# Confidential
+.streamlit/secrets.toml
+
+# large project files
+venv
