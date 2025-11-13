@@ -22,52 +22,109 @@ if "job_history" not in st.session_state:
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["🐳 Apptainer", "🔧 Scripts", "🔄 Workflows"])
 
-# ============================================================================
-# TAB 1: APPTAINER
-# ============================================================================
-with tab1:
-    st.header("Submit Batch Apptainer Jobs")
-    st.write("Run containerized applications on the HPC cluster.")
+
+
+def submit_batch_apptainer_jobs(
+    client,
+    bids_dir,
+    output_dir,
+    derivatives_dir,
+    subject_filter,
+    session_filter,
+    container_config,
+    selected_container,
+    cpus,
+    mem,
+    gpus,
+    time,
+    partition,
+    work_dir,
+    output_log_dir,
+    bind_paths,
+    custom_command=None,
+    dry_run=False
+):
+    """
+    Submit batch Apptainer jobs based on BIDS directory structure.
     
-    with st.form("apptainer_form"):
-        image_path = st.text_input(
-            "Apptainer Image Path", 
-            f"/home/{username}/images/my_container.sif",
-            help="Path to your .sif container image"
-        )
+    Scans the BIDS directory for subjects/sessions and submits jobs
+    to the SLURM scheduler.
+    """
+    import os
+    import re
+    from pathlib import Path
+    from datetime import datetime
+    
+    job_list = []
+    processed_sessions = 0
+    skipped_sessions = 0
+    failed_sessions = 0
+    status = st.empty()
+    
+    # Parse subject filter
+    if subject_filter:
+        subjects_to_process = [s.strip() for s in subject_filter.split(',')]
+    else:
+        subjects_to_process = None
+    
+    # Check if BIDS directory exists
+    bids_path = Path(bids_dir)
+    if not bids_path.exists():
+        st.error(f"BIDS directory does not exist: {bids_dir}")
+        return []
+    
+    # Find all subjects
+    subjects = sorted([d for d in bids_path.iterdir() if d.is_dir() and d.name.startswith('sub-')])
+    
+    if not subjects:
+        st.warning("No subjects found in BIDS directory")
+        return []
+    
+    st.write(f"Found {len(subjects)} subjects in BIDS directory")
+    
+    # Iterate through subjects
+    for subject_path in subjects:
+        subject = subject_path.name
         
-        command = st.text_input(
-            "Command", 
-            "python /app/run_pipeline.py --input data/",
-            help="Command to execute inside the container"
-        )
+        # Apply subject filter
+        if subjects_to_process and subject not in subjects_to_process:
+            continue
         
-        work_dir = st.text_input(
-            "Working Directory", 
-            f"/home/{username}/projects/my_project",
-            help="Directory where the job will run"
-        )
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            cpus = st.number_input("CPUs", min_value=1, max_value=64, value=4)
-        with col2:
-            mem = st.text_input("Memory", "16G")
-        with col3:
-            gpus = st.number_input("GPUs", min_value=0, max_value=8, value=0)
-        with col4:
-            time = st.text_input("Time Limit", "04:00:00")
-        
-        job_name = st.text_input("Job Name", "apptainer_job")
-        output_log = st.text_input("Output Log", "slurm-%j.out")
-        
-        submit = st.form_submit_button("🚀 Submit Job", use_container_width=True)
-        
-        if submit:
+        # Handle BIDS root processing (like fMRIPrep)
+        if container_config["input_type"] == "bids_root":
+            status.text(f"Processing... {subject}")
+            
             try:
-                with st.spinner("Submitting job..."):
+                # For these pipelines, we submit one job per subject
+                subject_id = subject.replace('sub-', '')
+                
+                if custom_command:
+                    command = custom_command.format(
+                        bids_dir=bids_dir,
+                        output_dir=output_dir,
+                        subject=subject_id
+                    )
+                else:
+                    command = container_config["command_template"].format(
+                        bids_dir=bids_dir,
+                        output_dir=output_dir,
+                        subject=subject_id
+                    )
+                
+                time_fmt = '%Y%m%d_%H%M%S'
+                job_name = f"{container_config['output_name']}_{subject}_{datetime.now().strftime(time_fmt)}"
+                log_file = f"{output_log_dir}/{job_name}.out"
+                
+                job_info = {
+                    "subject": subject,
+                    "command": command,
+                    "job_name": job_name
+                }
+                
+                if not dry_run:
+                    # Submit job via HPC client
                     job = client.submit_apptainer_job(
-                        image_path=image_path,
+                        image_path=container_config["image_path"],
                         command=command,
                         job_name=job_name,
                         work_dir=work_dir,
@@ -75,17 +132,433 @@ with tab1:
                         mem=mem,
                         gpus=gpus,
                         time=time,
-                        output_log=output_log,
+                        partition=partition,
+                        output_log=log_file,
+                        bind_paths=bind_paths
                     )
-                st.session_state.job_id = job["job_id"]
-                st.session_state.job_history.append({
-                    "job_id": job["job_id"],
-                    "type": "Apptainer",
-                    "name": job_name
-                })
-                st.success(f"✅ Submitted job {job['job_id']}")
+                    job_info["job_id"] = job["job_id"]
+                
+                job_list.append(job_info)
+                processed_sessions += 1
+                
             except Exception as e:
-                st.error(f"❌ Failed to submit job: {e}")
+                st.error(f"❌ Error processing {subject}: {e}")
+                failed_sessions += 1
+            
+            continue
+        
+        # Find sessions for this subject
+        sessions = sorted([d for d in subject_path.iterdir() if d.is_dir() and d.name.startswith('ses-')])
+        
+        # If no sessions, look directly in subject directory
+        if not sessions:
+            sessions = [subject_path]
+        
+        for session_path in sessions:
+            if session_path == subject_path:
+                session = None
+                session_label = "no_session"
+            else:
+                session = session_path.name
+                session_label = session
+            
+            # Apply session filter
+            if session_filter and session and session_filter not in session:
+                skipped_sessions += 1
+                continue
+            
+            status.text(f"Processing... {subject}/{session_label}")
+            
+            inputfile = None
+            input_filepath = None
+            
+            try:
+                # Determine where to look for input files
+                if container_config["input_type"] == "acquisition":
+                    # Look in raw BIDS data
+                    if container_config["input_subdir"]:
+                        search_path = session_path / container_config["input_subdir"]
+                    else:
+                        search_path = session_path
+                    
+                    if search_path.exists():
+                        # Find files matching pattern
+                        for file_path in search_path.glob("*.nii.gz"):
+                            if re.search(container_config["input_pattern"], file_path.name):
+                                inputfile = file_path.name
+                                input_filepath = str(file_path)
+                                break
+                    
+                    if not inputfile:
+                        skipped_sessions += 1
+                        continue
+                        
+                elif container_config["input_type"] == "derivatives":
+                    # Look in derivatives directory
+                    if not derivatives_dir:
+                        st.warning(f"⏭️ Derivatives directory not specified")
+                        skipped_sessions += 1
+                        continue
+                    
+                    # Construct path to derivatives
+                    deriv_path = Path(derivatives_dir) / container_config["requires_derivative"] / subject
+                    if session:
+                        deriv_path = deriv_path / session
+                    
+                    if container_config["input_subdir"]:
+                        deriv_path = deriv_path / container_config["input_subdir"]
+                    
+                    if not deriv_path.exists():
+                        st.warning(f"⏭️ No {container_config['requires_derivative']} output found for {subject}/{session_label}")
+                        skipped_sessions += 1
+                        continue
+                    
+                    # Find matching file
+                    for file_path in deriv_path.glob("*.nii.gz"):
+                        if re.search(container_config["input_pattern"], file_path.name):
+                            inputfile = file_path.name
+                            input_filepath = str(file_path)
+                            break
+                    
+                    if not inputfile:
+                        st.warning(f"⏭️ No matching file in {container_config['requires_derivative']} output for {subject}/{session_label}")
+                        skipped_sessions += 1
+                        continue
+                
+                # Prepare job submission
+                if inputfile and input_filepath:
+                    # Create subject/session specific output directory
+                    if session:
+                        session_output_dir = f"{output_dir}/{subject}/{session}"
+                    else:
+                        session_output_dir = f"{output_dir}/{subject}"
+                    
+                    # Format command
+                    if custom_command:
+                        command = custom_command.format(
+                            input_file=input_filepath,
+                            output_dir=session_output_dir,
+                            subject=subject,
+                            session=session if session else ""
+                        )
+                    else:
+                        command = container_config["command_template"].format(
+                            input_file=input_filepath,
+                            output_dir=session_output_dir
+                        )
+                    
+                    time_fmt = '%Y%m%d_%H%M%S'
+                    job_name = f"{container_config['output_name']}_{subject}_{session_label}_{datetime.now().strftime(time_fmt)}"
+                    log_file = f"{output_log_dir}/{job_name}.out"
+                    
+                    job_info = {
+                        "subject": subject,
+                        "session": session_label,
+                        "input_file": input_filepath,
+                        "command": command,
+                        "job_name": job_name
+                    }
+                    
+                    if not dry_run:
+                        # Submit job via HPC client
+                        job = client.submit_apptainer_job(
+                            image_path=container_config["image_path"],
+                            command=command,
+                            job_name=job_name,
+                            work_dir=work_dir,
+                            cpus=cpus,
+                            mem=mem,
+                            gpus=gpus,
+                            time=time,
+                            partition=partition,
+                            output_log=log_file,
+                            bind_paths=bind_paths
+                        )
+                        job_info["job_id"] = job["job_id"]
+                    
+                    job_list.append(job_info)
+                    processed_sessions += 1
+                    
+            except Exception as e:
+                st.error(f"❌ Error processing {subject}/{session_label}: {e}")
+                failed_sessions += 1
+    
+    # Clear status and show summary
+    status.empty()
+    
+    if dry_run:
+        st.info(
+            f"\n🔍 Dry Run Summary:\n"
+            f"   ✅ Jobs to submit: {processed_sessions}\n"
+            f"   ⏭️ Sessions to skip: {skipped_sessions}\n"
+            f"   ❌ Sessions with errors: {failed_sessions}\n"
+            f"   📋 Total jobs: {len(job_list)}"
+        )
+    else:
+        st.info(
+            f"\n📊 Summary:\n"
+            f"   ✅ Jobs submitted: {processed_sessions}\n"
+            f"   ⏭️ Sessions skipped: {skipped_sessions}\n"
+            f"   ❌ Sessions failed: {failed_sessions}\n"
+            f"   📋 Total job IDs: {len(job_list)}"
+        )
+    
+    return job_list
+
+# ============================================================================
+# TAB 1: APPTAINER
+# ============================================================================
+with tab1:
+    st.header("Submit Batch Apptainer Jobs")
+    st.write("Run containerized applications on the HPC cluster.")
+    
+    # Define available containers with their configurations
+    CONTAINER_CONFIGS = {
+        "BabySeg": {
+            "image_path": f"/home/{username}/images/babyseg.sif",
+            "command_template": "python /app/run_babyseg.py --input {input_file} --output {output_dir}",
+            "input_type": "acquisition",  # or "derivatives"
+            "input_pattern": r".*_T2w\.nii\.gz$",
+            "input_subdir": "anat",  # subdirectory within session (anat, func, dwi, etc.)
+            "requires_derivative": None,  # None if raw data, or name of required pipeline
+            "output_name": "babyseg",
+            "default_cpus": 8,
+            "default_mem": "32G",
+            "default_gpus": 0,
+            "default_time": "04:00:00",
+            "description": "Infant brain segmentation"
+        },
+        "GAMBAS": {
+            "image_path": f"/home/{username}/images/gambas.sif",
+            "command_template": "python /app/run_gambas.py --input {input_file} --output {output_dir}",
+            "input_type": "acquisition",
+            "input_pattern": r".*_T2w\.nii\.gz$",
+            "input_subdir": "anat",
+            "requires_derivative": None,
+            "output_name": "gambas",
+            "default_cpus": 4,
+            "default_mem": "16G",
+            "default_gpus": 0,
+            "default_time": "02:00:00",
+            "description": "Brain tissue segmentation"
+        },
+        "Circumference": {
+            "image_path": f"/home/{username}/images/circumference.sif",
+            "command_template": "python /app/run_circumference.py --input {input_file} --output {output_dir}",
+            "input_type": "derivatives",
+            "input_pattern": r"(.*_mrr\.nii\.gz|.*_ResCNN\.nii\.gz|.*_T2w_gambas\.nii\.gz)$",
+            "input_subdir": "anat",
+            "requires_derivative": "gambas",  # Requires GAMBAS output
+            "output_name": "circumference",
+            "default_cpus": 4,
+            "default_mem": "16G",
+            "default_gpus": 0,
+            "default_time": "01:00:00",
+            "description": "Head circumference measurement (requires GAMBAS)"
+        },
+        "MRR": {
+            "image_path": f"/home/{username}/images/mrr.sif",
+            "command_template": "python /app/run_mrr.py --input {input_file} --output {output_dir}",
+            "input_type": "acquisition",
+            "input_pattern": r".*_T2w\.nii\.gz$",
+            "input_subdir": "anat",
+            "requires_derivative": None,
+            "output_name": "mrr",
+            "default_cpus": 4,
+            "default_mem": "24G",
+            "default_gpus": 0,
+            "default_time": "03:00:00",
+            "description": "MRI reconstruction and registration"
+        },
+        "fMRIPrep": {
+            "image_path": f"/home/{username}/images/fmriprep.sif",
+            "command_template": "fmriprep {bids_dir} {output_dir} participant --participant-label {subject}",
+            "input_type": "bids_root",  # Uses entire BIDS directory
+            "input_pattern": None,
+            "input_subdir": None,
+            "requires_derivative": None,
+            "output_name": "fmriprep",
+            "default_cpus": 8,
+            "default_mem": "32G",
+            "default_gpus": 0,
+            "default_time": "24:00:00",
+            "description": "fMRI preprocessing pipeline"
+        }
+    }
+    
+    # Container selection
+    selected_container = st.selectbox(
+        "Select Container",
+        options=list(CONTAINER_CONFIGS.keys()),
+        format_func=lambda x: f"{x} - {CONTAINER_CONFIGS[x]['description']}",
+        help="Choose the containerized application to run"
+    )
+    
+    config = CONTAINER_CONFIGS[selected_container]
+    
+    # Show info about input requirements
+    if config["requires_derivative"]:
+        st.info(f"⚠️ Note: The {selected_container} container requires {config['requires_derivative'].upper()} outputs as input. Ensure that {config['requires_derivative'].upper()} has been run on the sessions.")
+    else:
+        if config["input_type"] == "acquisition":
+            st.info(f"ℹ️ This container will process raw acquisition data matching pattern: `{config['input_pattern']}`")
+        elif config["input_type"] == "bids_root":
+            st.info(f"ℹ️ This container processes entire BIDS datasets per subject")
+    
+    with st.form("apptainer_batch_form"):
+        st.subheader("Data Selection")
+        
+        # BIDS directory selection
+        bids_dir = st.text_input(
+            "BIDS Directory",
+            f"/home/{username}/bids_data",
+            help="Path to your BIDS dataset root directory"
+        )
+        
+        # Derivatives directory (for pipelines that need previous outputs)
+        if config["requires_derivative"]:
+            derivatives_dir = st.text_input(
+                "Derivatives Directory",
+                f"{bids_dir}/derivatives",
+                help="Path to derivatives directory containing previous pipeline outputs"
+            )
+        
+        # Subject/Session filtering
+        col1, col2 = st.columns(2)
+        with col1:
+            subject_filter = st.text_input(
+                "Subject Filter (optional)",
+                placeholder="e.g., sub-01, sub-02",
+                help="Comma-separated list of subjects to process (leave empty for all)"
+            )
+        with col2:
+            session_filter = st.text_input(
+                "Session Filter (optional)",
+                placeholder="e.g., ses-01",
+                help="Filter sessions by label (leave empty to process all)"
+            )
+        
+        # Output directory
+        output_dir = st.text_input(
+            "Output Directory",
+            f"{bids_dir}/derivatives/{config['output_name']}",
+            help="Where to save the processing outputs"
+        )
+        
+        # Advanced options
+        with st.expander("Job Configuration", expanded=False):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                cpus = st.number_input("CPUs", min_value=1, max_value=64, value=config["default_cpus"])
+            with col2:
+                mem = st.text_input("Memory", config["default_mem"])
+            with col3:
+                gpus = st.number_input("GPUs", min_value=0, max_value=8, value=config["default_gpus"])
+            with col4:
+                time = st.text_input("Time Limit", config["default_time"])
+            
+            partition = st.text_input(
+                "Partition",
+                "general",
+                help="SLURM partition to submit to"
+            )
+            
+            work_dir = st.text_input(
+                "Working Directory", 
+                f"/home/{username}/work/{selected_container.lower()}",
+                help="Temporary working directory for the job"
+            )
+            
+            output_log_dir = st.text_input(
+                "Log Directory",
+                f"/home/{username}/logs/{selected_container.lower()}",
+                help="Directory to save SLURM logs"
+            )
+            
+            # Bind paths for Apptainer
+            bind_paths = st.text_area(
+                "Additional Bind Paths (optional)",
+                placeholder="/data,/scratch,/tmp",
+                help="Comma-separated list of paths to bind into the container"
+            )
+            
+            # Custom command override (optional)
+            use_custom_command = st.checkbox("Use custom command template")
+            if use_custom_command:
+                custom_command = st.text_area(
+                    "Custom Command Template",
+                    config["command_template"],
+                    help="Override the default command template. Use {input_file}, {output_dir}, {subject}, {session} as placeholders"
+                )
+            else:
+                custom_command = None
+        
+        # Dry run option
+        dry_run = st.checkbox(
+            "Dry run (show jobs without submitting)",
+            value=False,
+            help="Preview what jobs would be submitted without actually submitting them"
+        )
+        
+        submit = st.form_submit_button("🚀 Submit Batch Jobs", use_container_width=True)
+        
+        if submit:
+            if not bids_dir or not output_dir:
+                st.error("❌ Please enter BIDS directory and output directory")
+            else:
+                try:
+                    with st.spinner("Scanning BIDS directory and preparing jobs..."):
+                        job_list = submit_batch_apptainer_jobs(
+                            client=client,
+                            bids_dir=bids_dir,
+                            output_dir=output_dir,
+                            derivatives_dir=derivatives_dir if config["requires_derivative"] else None,
+                            subject_filter=subject_filter,
+                            session_filter=session_filter,
+                            container_config=config,
+                            selected_container=selected_container,
+                            cpus=cpus,
+                            mem=mem,
+                            gpus=gpus,
+                            time=time,
+                            partition=partition,
+                            work_dir=work_dir,
+                            output_log_dir=output_log_dir,
+                            bind_paths=bind_paths,
+                            custom_command=custom_command,
+                            dry_run=dry_run
+                        )
+                    
+                    if not dry_run:
+                        # Store jobs in session state
+                        for job_info in job_list:
+                            st.session_state.job_history.append({
+                                "job_id": job_info["job_id"],
+                                "type": "Apptainer",
+                                "name": f"{selected_container}_{job_info['subject']}_{job_info.get('session', '')}"
+                            })
+                        
+                        st.success(f"✅ Successfully submitted {len(job_list)} jobs")
+                    else:
+                        st.info(f"🔍 Dry run complete: {len(job_list)} jobs would be submitted")
+                    
+                    # Show job details
+                    with st.expander("View Job Details", expanded=True):
+                        for job_info in job_list:
+                            if dry_run:
+                                st.write(f"**Would submit:** {job_info['subject']}/{job_info.get('session', 'N/A')}")
+                            else:
+                                st.write(f"**Job ID:** {job_info['job_id']} - {job_info['subject']}/{job_info.get('session', 'N/A')}")
+                            st.code(job_info['command'], language='bash')
+                            st.divider()
+                            
+                except Exception as e:
+                    st.error(f"❌ Failed to submit batch jobs: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+
+
 
 # ============================================================================
 # TAB 2: Scripts
