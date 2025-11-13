@@ -2,7 +2,6 @@ import streamlit as st
 import os
 from hpc_client_ssh import HPCSSHClient
 
-
 st.set_page_config(page_title="Job Manager", page_icon="🚀", layout="wide")
 
 st.title("🚀 Job Manager")
@@ -14,6 +13,12 @@ if not st.session_state.get("connected", False) or not st.session_state.get("cli
 
 client = st.session_state.client
 username = st.session_state.username
+
+try:
+    hpc_username = client.get_username()  # or however your client stores this
+except:
+    # Fallback if client doesn't have this method
+    hpc_username = st.session_state.get('hpc_username', 'username')
 
 # Initialize job history
 if "job_history" not in st.session_state:
@@ -67,24 +72,63 @@ def submit_batch_apptainer_jobs(
     else:
         subjects_to_process = None
     
-    # Check if BIDS directory exists
-    bids_path = Path(bids_dir)
-    if not bids_path.exists():
-        st.error(f"BIDS directory does not exist: {bids_dir}")
+    # Check if BIDS directory exists ON THE HPC (not locally!)
+    try:
+        # Use client to check if directory exists on HPC
+        dir_contents = client.list_directory(bids_dir)
+        st.write(f"✅ Found BIDS directory on HPC: {bids_dir}")
+    except Exception as e:
+        st.error(f"BIDS directory does not exist on HPC: {bids_dir}")
+        st.error(f"Error: {e}")
         return []
     
-    # Find all subjects
-    subjects = sorted([d for d in bids_path.iterdir() if d.is_dir() and d.name.startswith('sub-')])
+    # Find all subjects from the directory listing
+    subjects = sorted([item for item in dir_contents if item.startswith('sub-')])
     
     if not subjects:
-        st.warning("No subjects found in BIDS directory")
-        return []
+        st.warning(f"⚠️ No BIDS-format subjects found in directory")
+        st.write("BIDS format requires subject directories to start with 'sub-'")
+        
+        # Show what's actually in the directory
+        st.write(f"📂 Found {len(dir_contents)} items in directory:")
+        
+        # Create columns for better display
+        cols = st.columns(3)
+        for idx, item in enumerate(dir_contents[:30]):  # Show first 30 items
+            with cols[idx % 3]:
+                st.write(f"📁 {item}")
+        
+        if len(dir_contents) > 30:
+            st.write(f"... and {len(dir_contents) - 30} more items")
+        
+        # Offer option to proceed anyway if there are directories
+        if dir_contents:
+            st.write("---")
+            st.write("💡 **Non-BIDS directory detected**")
+            
+            use_non_bids = st.checkbox(
+                f"Process all {len(dir_contents)} subdirectories as subjects (not BIDS compliant)?",
+                help="This will treat each subdirectory as a subject, ignoring BIDS naming conventions"
+            )
+            
+            if use_non_bids:
+                st.info("⚠️ Running in non-BIDS mode. Directory structure may not match expected format.")
+                subjects = dir_contents
+            else:
+                return []
+        else:
+            return []
     
-    st.write(f"Found {len(subjects)} subjects in BIDS directory")
+    st.write(f"📊 Found {len(subjects)} subjects")
+    
+    # Show subjects being processed
+    with st.expander("View subjects", expanded=False):
+        for subj in subjects:
+            st.write(f"  • {subj}")
     
     # Iterate through subjects
-    for subject_path in subjects:
-        subject = subject_path.name
+    for subject in subjects:
+        subject_path = f"{bids_dir}/{subject}"
         
         # Apply subject filter
         if subjects_to_process and subject not in subjects_to_process:
@@ -96,7 +140,10 @@ def submit_batch_apptainer_jobs(
             
             try:
                 # For these pipelines, we submit one job per subject
-                subject_id = subject.replace('sub-', '')
+                if subject.startswith('sub-'):
+                    subject_id = subject.replace('sub-', '')
+                else:
+                    subject_id = subject
                 
                 if custom_command:
                     command = custom_command.format(
@@ -148,18 +195,27 @@ def submit_batch_apptainer_jobs(
             continue
         
         # Find sessions for this subject
-        sessions = sorted([d for d in subject_path.iterdir() if d.is_dir() and d.name.startswith('ses-')])
+        try:
+            subject_contents = client.list_directory(subject_path)
+            sessions = sorted([d for d in subject_contents if d.startswith('ses-')])
+        except Exception as e:
+            st.warning(f"Could not list directory {subject_path}: {e}")
+            skipped_sessions += 1
+            continue
         
         # If no sessions, look directly in subject directory
         if not sessions:
-            sessions = [subject_path]
+            sessions = [None]  # Process at subject level
+            st.write(f"  📁 {subject}: No sessions found, checking subject directory directly")
+        else:
+            st.write(f"  📁 {subject}: Found {len(sessions)} sessions")
         
-        for session_path in sessions:
-            if session_path == subject_path:
-                session = None
+        for session in sessions:
+            if session is None:
+                session_path = subject_path
                 session_label = "no_session"
             else:
-                session = session_path.name
+                session_path = f"{subject_path}/{session}"
                 session_label = session
             
             # Apply session filter
@@ -177,19 +233,35 @@ def submit_batch_apptainer_jobs(
                 if container_config["input_type"] == "acquisition":
                     # Look in raw BIDS data
                     if container_config["input_subdir"]:
-                        search_path = session_path / container_config["input_subdir"]
+                        search_path = f"{session_path}/{container_config['input_subdir']}"
                     else:
                         search_path = session_path
                     
-                    if search_path.exists():
-                        # Find files matching pattern
-                        for file_path in search_path.glob("*.nii.gz"):
-                            if re.search(container_config["input_pattern"], file_path.name):
-                                inputfile = file_path.name
-                                input_filepath = str(file_path)
-                                break
+                    # List files in the search path on HPC
+                    try:
+                        file_list = client.list_directory(search_path)
+                    except Exception as e:
+                        st.write(f"    ⏭️ Skipping {subject}/{session_label}: '{container_config['input_subdir']}' directory not found")
+                        skipped_sessions += 1
+                        continue
+                    
+                    # Find files matching pattern
+                    nii_files = [f for f in file_list if f.endswith('.nii.gz') or f.endswith('.nii')]
+                    
+                    if not nii_files:
+                        st.write(f"    ⏭️ Skipping {subject}/{session_label}: No .nii/.nii.gz files found")
+                        skipped_sessions += 1
+                        continue
+                    
+                    for filename in nii_files:
+                        if re.search(container_config["input_pattern"], filename):
+                            inputfile = filename
+                            input_filepath = f"{search_path}/{filename}"
+                            break
                     
                     if not inputfile:
+                        st.write(f"    ⏭️ Skipping {subject}/{session_label}: No files matching pattern '{container_config['input_pattern']}'")
+                        st.write(f"       Available files: {nii_files[:3]}")
                         skipped_sessions += 1
                         continue
                         
@@ -201,27 +273,32 @@ def submit_batch_apptainer_jobs(
                         continue
                     
                     # Construct path to derivatives
-                    deriv_path = Path(derivatives_dir) / container_config["requires_derivative"] / subject
+                    deriv_path = f"{derivatives_dir}/{container_config['requires_derivative']}/{subject}"
                     if session:
-                        deriv_path = deriv_path / session
+                        deriv_path = f"{deriv_path}/{session}"
                     
                     if container_config["input_subdir"]:
-                        deriv_path = deriv_path / container_config["input_subdir"]
+                        deriv_path = f"{deriv_path}/{container_config['input_subdir']}"
                     
-                    if not deriv_path.exists():
-                        st.warning(f"⏭️ No {container_config['requires_derivative']} output found for {subject}/{session_label}")
+                    # Check if path exists on HPC
+                    try:
+                        file_list = client.list_directory(deriv_path)
+                    except Exception as e:
+                        st.write(f"    ⏭️ Skipping {subject}/{session_label}: No {container_config['requires_derivative']} output found")
                         skipped_sessions += 1
                         continue
                     
                     # Find matching file
-                    for file_path in deriv_path.glob("*.nii.gz"):
-                        if re.search(container_config["input_pattern"], file_path.name):
-                            inputfile = file_path.name
-                            input_filepath = str(file_path)
+                    nii_files = [f for f in file_list if f.endswith('.nii.gz') or f.endswith('.nii')]
+                    
+                    for filename in nii_files:
+                        if re.search(container_config["input_pattern"], filename):
+                            inputfile = filename
+                            input_filepath = f"{deriv_path}/{filename}"
                             break
                     
                     if not inputfile:
-                        st.warning(f"⏭️ No matching file in {container_config['requires_derivative']} output for {subject}/{session_label}")
+                        st.write(f"    ⏭️ Skipping {subject}/{session_label}: No matching file in {container_config['requires_derivative']} output")
                         skipped_sessions += 1
                         continue
                 
@@ -278,9 +355,12 @@ def submit_batch_apptainer_jobs(
                     
                     job_list.append(job_info)
                     processed_sessions += 1
+                    st.write(f"    ✅ Prepared job for {subject}/{session_label}: {inputfile}")
                     
             except Exception as e:
                 st.error(f"❌ Error processing {subject}/{session_label}: {e}")
+                import traceback
+                st.code(traceback.format_exc())
                 failed_sessions += 1
     
     # Clear status and show summary
@@ -312,10 +392,25 @@ with tab1:
     st.header("Submit Batch Apptainer Jobs")
     st.write("Run containerized applications on the HPC cluster.")
     
+
     # Define available containers with their configurations
     CONTAINER_CONFIGS = {
+        "DebugTest": {
+            "image_path": f"/home/{hpc_username}/repos/debug_test.sif",
+            "command_template": "python /app/test_script.py --input {input_file} --output {output_dir} --subject {subject} --session {session}",
+            "input_type": "acquisition",
+            "input_pattern": r".*_T2w\.nii\.gz$",
+            "input_subdir": "anat",
+            "requires_derivative": None,
+            "output_name": "debug_test",
+            "default_cpus": 1,
+            "default_mem": "2G",
+            "default_gpus": 0,
+            "default_time": "00:10:00",
+            "description": "Debug test container for workflow validation"
+        },
         "BabySeg": {
-            "image_path": f"/home/{username}/images/babyseg.sif",
+            "image_path": f"/home/{hpc_username}/images/babyseg.sif",
             "command_template": "python /app/run_babyseg.py --input {input_file} --output {output_dir}",
             "input_type": "acquisition",  # or "derivatives"
             "input_pattern": r".*_T2w\.nii\.gz$",
@@ -329,7 +424,7 @@ with tab1:
             "description": "Infant brain segmentation"
         },
         "GAMBAS": {
-            "image_path": f"/home/{username}/images/gambas.sif",
+            "image_path": f"/home/{hpc_username}/images/gambas.sif",
             "command_template": "python /app/run_gambas.py --input {input_file} --output {output_dir}",
             "input_type": "acquisition",
             "input_pattern": r".*_T2w\.nii\.gz$",
@@ -343,7 +438,7 @@ with tab1:
             "description": "Brain tissue segmentation"
         },
         "Circumference": {
-            "image_path": f"/home/{username}/images/circumference.sif",
+            "image_path": f"/home/{hpc_username}/images/circumference.sif",
             "command_template": "python /app/run_circumference.py --input {input_file} --output {output_dir}",
             "input_type": "derivatives",
             "input_pattern": r"(.*_mrr\.nii\.gz|.*_ResCNN\.nii\.gz|.*_T2w_gambas\.nii\.gz)$",
@@ -357,7 +452,7 @@ with tab1:
             "description": "Head circumference measurement (requires GAMBAS)"
         },
         "MRR": {
-            "image_path": f"/home/{username}/images/mrr.sif",
+            "image_path": f"/home/{hpc_username}/images/mrr.sif",
             "command_template": "python /app/run_mrr.py --input {input_file} --output {output_dir}",
             "input_type": "acquisition",
             "input_pattern": r".*_T2w\.nii\.gz$",
@@ -371,7 +466,7 @@ with tab1:
             "description": "MRI reconstruction and registration"
         },
         "fMRIPrep": {
-            "image_path": f"/home/{username}/images/fmriprep.sif",
+            "image_path": f"/home/{hpc_username}/images/fmriprep.sif",
             "command_template": "fmriprep {bids_dir} {output_dir} participant --participant-label {subject}",
             "input_type": "bids_root",  # Uses entire BIDS directory
             "input_pattern": None,
@@ -405,23 +500,69 @@ with tab1:
         elif config["input_type"] == "bids_root":
             st.info(f"ℹ️ This container processes entire BIDS datasets per subject")
     
+
+    # Move project selection OUTSIDE the form so it can update dynamically
+    try:
+        project_dirs = client.list_project_directories()
+        if project_dirs:
+            selected_project = st.selectbox(
+                "Select Project",
+                options=project_dirs,
+                help="Projects found in ~/projects/",
+                key="selected_project"
+            )
+            # Construct bids_dir based on selected project
+            bids_dir = f"/home/{hpc_username}/projects/{selected_project}"
+            
+            # Debug output (can remove later)
+            st.write(f"🔍 Debug - selected_project: {selected_project}")
+            st.write(f"🔍 Debug - hpc_username: {hpc_username}")
+            st.write(f"🔍 Debug - Final bids_dir: {bids_dir}")
+            
+            selected_project_available = True
+        else:
+            st.warning("No projects found in ~/projects/")
+            # Fallback to manual input
+            bids_dir = st.text_input(
+                "BIDS Directory", 
+                f"/home/{hpc_username}/projects/remoteTest",
+                key="manual_bids_dir"
+            )
+            selected_project = None
+            selected_project_available = False
+    except Exception as e:
+        st.warning(f"Could not load projects: {e}")
+        # Fallback to manual input
+        bids_dir = st.text_input(
+            "BIDS Directory", 
+            f"/home/{hpc_username}/projects/remoteTest", 
+            help="Path to your BIDS dataset root directory",
+            key="fallback_bids_dir"
+        )
+        selected_project = None
+        selected_project_available = False
+
+    # Now create the form with the updated bids_dir
     with st.form("apptainer_batch_form"):
         st.subheader("Data Selection")
         
-        # BIDS directory selection
-        bids_dir = st.text_input(
-            "BIDS Directory",
-            f"/home/{username}/bids_data",
-            help="Path to your BIDS dataset root directory"
-        )
+        # Display the selected paths (read-only info) - REMOVE the text_input here
+        st.info(f"📁 BIDS Directory: `{bids_dir}`")
+        
+        # Remove this section completely if project was selected above:
+        # DON'T INCLUDE THIS:
+        # bids_dir = st.text_input("BIDS Directory", "/home/k2252514/projects/remoteTest")
         
         # Derivatives directory (for pipelines that need previous outputs)
         if config["requires_derivative"]:
+            default_derivatives = f"{bids_dir}/derivatives"
             derivatives_dir = st.text_input(
                 "Derivatives Directory",
-                f"{bids_dir}/derivatives",
+                value=default_derivatives,
                 help="Path to derivatives directory containing previous pipeline outputs"
             )
+        else:
+            derivatives_dir = None
         
         # Subject/Session filtering
         col1, col2 = st.columns(2)
@@ -438,12 +579,15 @@ with tab1:
                 help="Filter sessions by label (leave empty to process all)"
             )
         
-        # Output directory
+        # Output directory - computed from bids_dir
+        default_output = f"{bids_dir}/derivatives/{config['output_name']}"
         output_dir = st.text_input(
             "Output Directory",
-            f"{bids_dir}/derivatives/{config['output_name']}",
+            value=default_output,
             help="Where to save the processing outputs"
         )
+    
+
         
         # Advanced options
         with st.expander("Job Configuration", expanded=False):
@@ -463,15 +607,17 @@ with tab1:
                 help="SLURM partition to submit to"
             )
             
+            default_work_dir = f"{bids_dir}/work/{selected_container.lower()}"
             work_dir = st.text_input(
                 "Working Directory", 
-                f"/home/{username}/work/{selected_container.lower()}",
+                value=default_work_dir,
                 help="Temporary working directory for the job"
             )
             
+            default_log_dir = f"{bids_dir}/logs/{selected_container.lower()}"
             output_log_dir = st.text_input(
                 "Log Directory",
-                f"/home/{username}/logs/{selected_container.lower()}",
+                value=default_log_dir,
                 help="Directory to save SLURM logs"
             )
             

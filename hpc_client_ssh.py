@@ -34,18 +34,35 @@ class HPCSSHClient:
     # --------------------------------------------------------------------
     # Basic filesystem and job management
     # --------------------------------------------------------------------
+    def get_username(self):
+        """Return the HPC username"""
+        return self.username
 
     def list_projects(self, base_dir="/projects"):
         return self._run(f"ls -d {base_dir}/*/").splitlines()
 
+    def list_directory(self, path):
+        """List contents of a directory on the HPC"""
+        try:
+            command = f"ls -1 {path}"
+            result = self._run(command)
+            if not result:
+                return []
+            return [line.strip() for line in result.split('\n') if line.strip()]
+        except Exception as e:
+            raise Exception(f"Failed to list directory {path}: {str(e)}")
+
     def list_project_directories(self, base_path="~/projects"):
         """List all directories in the projects folder."""
-        result = self._run(f"ls -d {base_path}/*/")
-        if not result:
-            return []
-        # Extract just the directory names
-        dirs = [d.strip().rstrip('/').split('/')[-1] for d in result.splitlines() if d.strip()]
-        return sorted(dirs)
+        try:
+            result = self._run(f"ls -d {base_path}/*/")
+            if not result:
+                return []
+            # Extract just the directory names
+            dirs = [d.strip().rstrip('/').split('/')[-1] for d in result.splitlines() if d.strip()]
+            return sorted(dirs)
+        except Exception as e:
+            raise Exception(f"Failed to list project directories: {str(e)}")
     
     def job_status(self, job_id):
         """Return job state (RUNNING, COMPLETED, FAILED, etc.)."""
