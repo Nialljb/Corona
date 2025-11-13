@@ -38,6 +38,15 @@ class HPCSSHClient:
     def list_projects(self, base_dir="/projects"):
         return self._run(f"ls -d {base_dir}/*/").splitlines()
 
+    def list_project_directories(self, base_path="~/projects"):
+        """List all directories in the projects folder."""
+        result = self._run(f"ls -d {base_path}/*/")
+        if not result:
+            return []
+        # Extract just the directory names
+        dirs = [d.strip().rstrip('/').split('/')[-1] for d in result.splitlines() if d.strip()]
+        return sorted(dirs)
+    
     def job_status(self, job_id):
         """Return job state (RUNNING, COMPLETED, FAILED, etc.)."""
         state = self._run(f"squeue -j {job_id} -h -o '%T'")
@@ -49,6 +58,29 @@ class HPCSSHClient:
         sftp.close()
         print(f"Downloaded {remote_path} → {local_path}")
 
+    def submit_job(self, script_path, job_name="test_job"):
+        """Submit a job to the scheduler (example: Slurm)."""
+        cmd = f"sbatch --job-name={job_name} {script_path}"
+        result = self._run(cmd)
+        
+        # Check if result is empty or doesn't contain expected output
+        if not result:
+            raise ValueError(f"sbatch command returned empty result. Command: {cmd}")
+        
+        # Split and check if we have output
+        parts = result.split()
+        if not parts:
+            raise ValueError(f"sbatch command returned unexpected format: '{result}'")
+        
+        # Typical sbatch output: "Submitted batch job 12345"
+        # Extract job ID (last element)
+        job_id = parts[-1]
+        
+        # Validate it looks like a job ID (numeric)
+        if not job_id.isdigit():
+            raise ValueError(f"Expected numeric job ID, got: '{job_id}' from output: '{result}'")
+        
+        return {"job_id": job_id}
     # --------------------------------------------------------------------
     # Slurm + Apptainer job submission
     # --------------------------------------------------------------------
