@@ -26,10 +26,19 @@ class HPCSSHClient:
 
     def _run(self, command):
         stdin, stdout, stderr = self.ssh_client.exec_command(command)
+        exit_status = stdout.channel.recv_exit_status()  # Wait for command to complete
         out = stdout.read().decode().strip()
         err = stderr.read().decode().strip()
+        
+        if exit_status != 0:
+            raise RuntimeError(f"Command failed with exit code {exit_status}:\n"
+                            f"Command: {command}\n"
+                            f"Stderr: {err}\n"
+                            f"Stdout: {out}")
+        
         if err:
             print(f"[stderr] {err}")
+        
         return out
 
     # --------------------------------------------------------------------
@@ -38,6 +47,15 @@ class HPCSSHClient:
 
     def list_projects(self, base_dir="/projects"):
         return self._run(f"ls -d {base_dir}/*/").splitlines()
+    
+    def list_project_directories(self, base_path="~/projects"):
+        """List all directories in the projects folder."""
+        result = self._run(f"ls -d {base_path}/*/")
+        if not result:
+            return []
+        # Extract just the directory names
+        dirs = [d.strip().rstrip('/').split('/')[-1] for d in result.splitlines() if d.strip()]
+        return sorted(dirs)
 
     def job_status(self, job_id):
         """Return job state (RUNNING, COMPLETED, FAILED, etc.)."""
@@ -54,7 +72,25 @@ class HPCSSHClient:
         """Submit a job to the scheduler (example: Slurm)."""
         cmd = f"sbatch --job-name={job_name} {script_path}"
         result = self._run(cmd)
-        return {"job_id": result.split()[-1]}
+        
+        # Check if result is empty or doesn't contain expected output
+        if not result:
+            raise ValueError(f"sbatch command returned empty result. Command: {cmd}")
+        
+        # Split and check if we have output
+        parts = result.split()
+        if not parts:
+            raise ValueError(f"sbatch command returned unexpected format: '{result}'")
+        
+        # Typical sbatch output: "Submitted batch job 12345"
+        # Extract job ID (last element)
+        job_id = parts[-1]
+        
+        # Validate it looks like a job ID (numeric)
+        if not job_id.isdigit():
+            raise ValueError(f"Expected numeric job ID, got: '{job_id}' from output: '{result}'")
+        
+        return {"job_id": job_id}
 
     # --------------------------------------------------------------------
     # Slurm + Apptainer job submission
@@ -71,29 +107,30 @@ class HPCSSHClient:
         gpus=0,
         time="01:00:00",
         output_log="slurm-%j.out",
-    ):
+        ):
+        
         """
         Create and submit a temporary SLURM batch script to run Apptainer.
         """
         slurm_script = f"""#!/bin/bash
-#SBATCH --job-name={job_name}
-#SBATCH --output={output_log}
-#SBATCH --cpus-per-task={cpus}
-#SBATCH --mem={mem}
-#SBATCH --time={time}
-"""
+    #SBATCH --job-name={job_name}
+    #SBATCH --output={output_log}
+    #SBATCH --cpus-per-task={cpus}
+    #SBATCH --mem={mem}
+    #SBATCH --time={time}
+    """
 
         if gpus > 0:
             slurm_script += f"#SBATCH --gres=gpu:{gpus}\n"
 
         slurm_script += f"""
-cd {work_dir}
+    cd {work_dir}
 
-echo "Running Apptainer job on $(hostname)"
-apptainer exec {image_path} {command}
+    echo "Running Apptainer job on $(hostname)"
+    apptainer exec {image_path} {command}
 
-echo "Job completed at $(date)"
-"""
+    echo "Job completed at $(date)"
+    """
 
         # Write the script to a temporary file and upload it
         with tempfile.NamedTemporaryFile("w", delete=False) as f:
@@ -108,12 +145,21 @@ echo "Job completed at $(date)"
 
         # Submit job
         result = self._run(f"sbatch {remote_script}")
-        job_id = result.strip().split()[-1]
+        
+        # Better error handling
+        if not result:
+            raise ValueError(f"sbatch command returned empty result for {remote_script}")
+        
+        parts = result.strip().split()
+        if not parts:
+            raise ValueError(f"sbatch command returned unexpected format: '{result}'")
+        
+        job_id = parts[-1]
+        if not job_id.isdigit():
+            raise ValueError(f"Expected numeric job ID, got: '{job_id}' from output: '{result}'")
+        
         print(f"Submitted job {job_id}")
         return {"job_id": job_id, "remote_script": remote_script}
-
-    def close(self):
-        self.ssh_client.close()
 
 
 

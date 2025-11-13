@@ -27,6 +27,7 @@ if connect_btn:
 
 client = st.session_state.client
 
+# Only show job submission UI if connected
 if client:
     st.divider()
     st.subheader("⚙️ Submit an Apptainer Job")
@@ -67,6 +68,7 @@ if client:
     # -----------------------------
     # Node / Module selection
     # -----------------------------
+    st.divider()
     st.subheader("⚙️ Run a Node")
     node = {
         "Structural Segmentation": "/home/k2252514/nodes/run_segmentation.sh",
@@ -76,14 +78,33 @@ if client:
     }
 
     selected_node = st.selectbox("Select a Node to run:", list(node.keys()))
-    project_path = st.text_input("Project Path", "/home/k2252514/projects/remoteTest")
+    
+    # Get project directories dropdown
+    try:
+        project_dirs = client.list_project_directories()
+        if project_dirs:
+            selected_project = st.selectbox(
+                "Select Project",
+                options=project_dirs,
+                help="Projects found in ~/projects/"
+            )
+            project_path = f"~/projects/{selected_project}"
+        else:
+            st.warning("No projects found in ~/projects/")
+            project_path = st.text_input("Project Path", "/home/k2252514/projects/remoteTest")
+    except Exception as e:
+        st.warning(f"Could not load projects: {e}")
+        project_path = st.text_input("Project Path", "/home/k2252514/projects/remoteTest")
 
-    if st.button("Submit Job"):
+    if st.button("👾 Submit Node Job"):
         script = node[selected_node]
         with st.spinner("Submitting job..."):
-            job = client.submit_job(script, job_name=selected_node.replace(" ", "_"))
-        st.session_state.job_id = job["job_id"]
-        st.success(f"✅ Submitted job {job['job_id']}")
+            try:
+                job = client.submit_job(script, job_name=selected_node.replace(" ", "_"))
+                st.session_state.job_id = job["job_id"]
+                st.success(f"✅ Submitted job {job['job_id']}")
+            except Exception as e:
+                st.error(f"Failed to submit job: {e}")
 
     # -----------------------------
     # Monitor job
@@ -93,16 +114,85 @@ if client:
         st.subheader("📊 Job Status")
         job_id = st.session_state.job_id
         if st.button("Check Job Status"):
-            status = client.job_status(job_id)
-            st.info(f"Job {job_id} status: **{status}**")
+            try:
+                status = client.job_status(job_id)
+                st.info(f"Job {job_id} status: **{status}**")
+            except Exception as e:
+                st.error(f"Failed to check status: {e}")
 
     # -----------------------------
     # Download results
     # -----------------------------
     st.divider()
     st.subheader("📦 Download Results")
-    remote_path = st.text_input("Remote File", f"{work_dir}/output/results.zip")
-    local_path = st.text_input("Save As", "results.zip")
-    if st.button("Download"):
-        client.download_results(remote_path, local_path)
-        st.success(f"✅ Downloaded {remote_path} → {local_path}")
+    
+    # Get user's home and downloads directory
+    home_dir = os.path.expanduser("~")
+    download_dir = os.path.join(home_dir, "Downloads")
+    
+    # Remote file path with suggestions
+    remote_path = st.text_input(
+        "Remote File Path", 
+        value="",
+        help="Enter the full path to the file on the HPC cluster"
+    )
+    
+
+    # Show helpful suggestions based on context
+    if remote_path:
+        st.caption(f"📂 Remote: `{remote_path}`")
+    elif 'work_dir' in locals():
+        st.caption(f"💡 Example: `{work_dir}/output/results.zip`")
+    
+    # Local save path - auto-generate from remote filename
+    default_filename = os.path.basename(remote_path) if remote_path else "results.zip"
+    local_path = st.text_input(
+        "Save As (Local Path)", 
+        value=os.path.join(download_dir, default_filename),
+        help="Full path where the file will be saved locally"
+    )
+    
+    # Download button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        download_btn = st.button("📥 Download", disabled=not remote_path, use_container_width=True)
+    with col2:
+        if not remote_path:
+            st.caption("⚠️ Please enter a remote file path")
+    
+    if download_btn:
+        try:
+            # Ensure local directory exists
+            local_dir = os.path.dirname(local_path)
+            if local_dir:
+                os.makedirs(local_dir, exist_ok=True)
+            
+            with st.spinner(f"Downloading {os.path.basename(remote_path)}..."):
+                client.download_results(remote_path, local_path)
+            
+            st.success(f"✅ Downloaded successfully!")
+            st.info(f"📂 Saved to: `{local_path}`")
+            
+            # Show file info
+            if os.path.exists(local_path):
+                file_size = os.path.getsize(local_path)
+                st.metric("File Size", f"{file_size / (1024*1024):.2f} MB")
+        except Exception as e:
+            st.error(f"❌ Download failed: {e}")
+
+else:
+    # Show message when not connected
+    st.info("👈 Please connect to the HPC cluster using the sidebar to get started.")
+    st.markdown("""
+    ### Getting Started
+    1. Enter your HPC hostname (e.g., `login1.nan.kcl.ac.uk`)
+    2. Enter your username
+    3. Provide the path to your SSH private key
+    4. Click **Connect**
+    
+    Once connected, you'll be able to:
+    - Submit Apptainer jobs
+    - Run pre-configured nodes
+    - Monitor job status
+    - Download results
+    """)
