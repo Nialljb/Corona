@@ -62,7 +62,7 @@ if st.session_state.connected:
 
     st.divider()
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.markdown("### 🚀 Job Manager")
@@ -82,6 +82,17 @@ if st.session_state.connected:
         if st.button("Go to Download", use_container_width=True):
             st.switch_page("pages/3_Download_Data.py")
 
+    # with col4:
+    #     st.markdown("### 📚 Data Explorer")
+    #     st.write("Explore and visualize your data files interactively.")
+    #     if st.button("Go to Data Explorer", use_container_width=True):
+    #         st.switch_page("pages/4_Data_Explorer.py")
+
+    with col4:
+        st.markdown("### 📚 Data Explorer")
+        st.write("Explore and visualize your data files interactively.")
+        if st.button("Go to Data Explorer", use_container_width=True):
+            st.switch_page("pages/4_Projects.py")
 
 
     st.divider()
