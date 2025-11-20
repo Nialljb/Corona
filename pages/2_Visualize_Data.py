@@ -158,14 +158,17 @@ if df is not None:
             st.plotly_chart(fig, use_container_width=True)
     
     elif viz_type == "Heatmap":
-        corr_data = df[numeric_cols].corr()
-        fig = px.imshow(
-            corr_data,
-            labels=dict(color="Correlation"),
-            title="Correlation Heatmap",
-            color_continuous_scale="RdBu_r"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        if not numeric_cols:
+            st.warning("No numeric columns available for correlation heatmap.")
+        else:
+            corr_data = df[numeric_cols].corr()
+            fig = px.imshow(
+                corr_data,
+                labels=dict(color="Correlation"),
+                title="Correlation Heatmap",
+                color_continuous_scale="RdBu_r"
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.info("📁 Upload a data file to get started with visualizations.")
