@@ -30,6 +30,14 @@ class HPCSSHClient:
         if err:
             print(f"[stderr] {err}")
         return out
+    
+    def _run_with_exit_code(self, command):
+        """Run command and return (stdout, stderr, exit_code)"""
+        stdin, stdout, stderr = self.ssh_client.exec_command(command)
+        out = stdout.read().decode().strip()
+        err = stderr.read().decode().strip()
+        exit_code = stdout.channel.recv_exit_status()
+        return out, err, exit_code
 
     # --------------------------------------------------------------------
     # Basic filesystem and job management
@@ -113,6 +121,8 @@ class HPCSSHClient:
         gpus=0,
         time="01:00:00",
         output_log="slurm-%j.out",
+        partition=None,
+        bind_paths=None,
     ):
         """
         Create and submit a temporary SLURM batch script to run Apptainer.
@@ -125,17 +135,36 @@ class HPCSSHClient:
 #SBATCH --time={time}
 """
 
+        if partition:
+            slurm_script += f"#SBATCH --partition={partition}\n"
+
         if gpus > 0:
             slurm_script += f"#SBATCH --gres=gpu:{gpus}\n"
+
+        # Prepare bind paths for Apptainer
+        bind_option = ""
+        if bind_paths:
+            # Clean up bind_paths - remove whitespace and ensure proper formatting
+            bind_list = [p.strip() for p in bind_paths.split(',') if p.strip()]
+            if bind_list:
+                bind_option = f"--bind {','.join(bind_list)}"
 
         slurm_script += f"""
 cd {work_dir}
 
 echo "Running Apptainer job on $(hostname)"
-apptainer exec {image_path} {command}
+apptainer exec {bind_option} {image_path} {command}
 
 echo "Job completed at $(date)"
 """
+
+        # Ensure work directory exists
+        self._run(f"mkdir -p {work_dir}")
+        
+        # Ensure log directory exists (extract directory from output_log path)
+        if "/" in output_log:
+            log_dir = os.path.dirname(output_log)
+            self._run(f"mkdir -p {log_dir}")
 
         # Write the script to a temporary file and upload it
         with tempfile.NamedTemporaryFile("w", delete=False) as f:
@@ -148,10 +177,28 @@ echo "Job completed at $(date)"
         sftp.close()
         os.remove(tmp_local)
 
-        # Submit job
-        result = self._run(f"sbatch {remote_script}")
-        job_id = result.strip().split()[-1]
-        print(f"Submitted job {job_id}")
+        # Submit job with better error handling
+        out, err, exit_code = self._run_with_exit_code(f"sbatch {remote_script}")
+        
+        # Check if sbatch was successful
+        if exit_code != 0:
+            error_msg = f"sbatch failed with exit code {exit_code}"
+            if err:
+                error_msg += f"\nError: {err}"
+            if out:
+                error_msg += f"\nOutput: {out}"
+            raise RuntimeError(error_msg)
+        
+        if not out:
+            raise RuntimeError(f"sbatch command returned no output for {remote_script}")
+        
+        # Parse job ID from sbatch output (typically "Submitted batch job 12345")
+        parts = out.strip().split()
+        if len(parts) == 0:
+            raise RuntimeError(f"Unexpected sbatch output: {out}")
+        
+        job_id = parts[-1]
+        print(f"Submitted job {job_id}: {out}")
         return {"job_id": job_id, "remote_script": remote_script}
 
     def close(self):

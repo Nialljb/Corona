@@ -321,7 +321,9 @@ def submit_batch_apptainer_jobs(
                     else:
                         command = container_config["command_template"].format(
                             input_file=input_filepath,
-                            output_dir=session_output_dir
+                            output_dir=session_output_dir,
+                            subject=subject,
+                            session=session if session else ""
                         )
                     
                     time_fmt = '%Y%m%d_%H%M%S'
@@ -399,8 +401,8 @@ with tab1:
             "image_path": f"/home/{hpc_username}/repos/debug_test.sif",
             "command_template": "python /app/test_script.py --input {input_file} --output {output_dir} --subject {subject} --session {session}",
             "input_type": "acquisition",
-            "input_pattern": r".*_T2w\.nii\.gz$",
-            "input_subdir": "anat",
+            "input_pattern": r".*\.nii\.gz$",
+            "input_subdir": "t2",
             "requires_derivative": None,
             "output_name": "debug_test",
             "default_cpus": 1,
