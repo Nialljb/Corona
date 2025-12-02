@@ -82,6 +82,19 @@ def submit_batch_apptainer_jobs(
         st.error(f"Error: {e}")
         return []
     
+    # Ensure required directories exist on HPC
+    try:
+        # Create work directory if it doesn't exist
+        client._run(f"mkdir -p {work_dir}")
+        # Create output log directory if it doesn't exist
+        client._run(f"mkdir -p {output_log_dir}")
+        # Create output directory if it doesn't exist
+        client._run(f"mkdir -p {output_dir}")
+        st.write(f"✅ Created required directories on HPC")
+    except Exception as e:
+        st.warning(f"⚠️ Could not create directories: {e}")
+        # Continue anyway as directories might already exist
+    
     # Find all subjects from the directory listing
     subjects = sorted([item for item in dir_contents if item.startswith('sub-')])
     
@@ -169,6 +182,12 @@ def submit_batch_apptainer_jobs(
                 }
                 
                 if not dry_run:
+                    # Ensure output directory exists
+                    try:
+                        client._run(f"mkdir -p {output_dir}")
+                    except Exception as e:
+                        st.warning(f"Could not create output directory {output_dir}: {e}")
+                    
                     # Submit job via HPC client
                     job = client.submit_apptainer_job(
                         image_path=container_config["image_path"],
@@ -341,6 +360,12 @@ def submit_batch_apptainer_jobs(
                     }
                     
                     if not dry_run:
+                        # Ensure session output directory exists
+                        try:
+                            client._run(f"mkdir -p {session_output_dir}")
+                        except Exception as e:
+                            st.warning(f"Could not create session output directory {session_output_dir}: {e}")
+                        
                         # Submit job via HPC client
                         job = client.submit_apptainer_job(
                             image_path=container_config["image_path"],
