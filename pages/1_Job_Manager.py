@@ -149,13 +149,13 @@ def submit_batch_apptainer_jobs(
                     command = custom_command.format(
                         bids_dir=bids_dir,
                         output_dir=output_dir,
-                        subject=subject_id
+                        subject_id=subject_id
                     )
                 else:
                     command = container_config["command_template"].format(
                         bids_dir=bids_dir,
                         output_dir=output_dir,
-                        subject=subject_id
+                        subject_id=subject_id
                     )
                 
                 time_fmt = '%Y%m%d_%H%M%S'
@@ -179,9 +179,7 @@ def submit_batch_apptainer_jobs(
                         mem=mem,
                         gpus=gpus,
                         time=time,
-                        partition=partition,
-                        output_log=log_file,
-                        bind_paths=bind_paths
+                        output_log=log_file
                     )
                     job_info["job_id"] = job["job_id"]
                 
@@ -316,12 +314,18 @@ def submit_batch_apptainer_jobs(
                             input_file=input_filepath,
                             output_dir=session_output_dir,
                             subject=subject,
-                            session=session if session else ""
+                            session=session if session else "",
+                            subject_id=subject.replace('sub-', '') if subject.startswith('sub-') else subject,
+                            bids_dir=bids_dir
                         )
                     else:
                         command = container_config["command_template"].format(
                             input_file=input_filepath,
-                            output_dir=session_output_dir
+                            output_dir=session_output_dir,
+                            subject=subject,
+                            session=session if session else "",
+                            subject_id=subject.replace('sub-', '') if subject.startswith('sub-') else subject,
+                            bids_dir=bids_dir
                         )
                     
                     time_fmt = '%Y%m%d_%H%M%S'
@@ -347,9 +351,7 @@ def submit_batch_apptainer_jobs(
                             mem=mem,
                             gpus=gpus,
                             time=time,
-                            partition=partition,
-                            output_log=log_file,
-                            bind_paths=bind_paths
+                            output_log=log_file
                         )
                         job_info["job_id"] = job["job_id"]
                     
@@ -467,7 +469,7 @@ with tab1:
         },
         "fMRIPrep": {
             "image_path": f"/home/{hpc_username}/images/fmriprep.sif",
-            "command_template": "fmriprep {bids_dir} {output_dir} participant --participant-label {subject}",
+            "command_template": "fmriprep {bids_dir} {output_dir} participant --participant-label {subject_id}",
             "input_type": "bids_root",  # Uses entire BIDS directory
             "input_pattern": None,
             "input_subdir": None,
