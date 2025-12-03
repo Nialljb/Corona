@@ -1,3 +1,4 @@
+from datetime import datetime
 import streamlit as st
 import os
 from hpc_client_ssh import HPCSSHClient
@@ -28,6 +29,73 @@ if "job_history" not in st.session_state:
 tab1, tab2, tab3 = st.tabs(["🐳 Apptainer", "🔧 Scripts", "🔄 Workflows"])
 
 
+def submit_batch_script_jobs(client, config, **kwargs):
+    """Submit script-based jobs instead of container jobs"""
+    
+    bids_dir = kwargs['bids_dir']
+    output_dir = kwargs['output_dir']
+    work_dir = kwargs.get('work_dir', '/tmp')
+    cpus = kwargs.get('cpus', 8)
+    mem = kwargs.get('mem', '32G')
+    time_limit = kwargs.get('time', '12:00:00')
+    
+    # Format command with parameters
+    command = config["command_template"].format(
+        script_path=config["script_path"],
+        bids_dir=bids_dir,
+        output_dir=output_dir
+    )
+    
+    job_name = f"vbm_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # Create SLURM script content
+    slurm_script = f"""#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --mem={mem}
+#SBATCH --time={time_limit}
+#SBATCH --output={work_dir}/{job_name}.out
+
+# Load required modules
+module load matlab spm
+
+# Change to work directory
+cd {work_dir}
+
+echo "Starting VBM analysis job on $(hostname)"
+echo "BIDS Directory: {bids_dir}"
+echo "Output Directory: {output_dir}"
+
+# Run the command
+{command}
+
+echo "Job completed at $(date)"
+"""
+    
+    # Write the script to a temporary file and upload it
+    import tempfile
+    import os
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        f.write(slurm_script)
+        tmp_local = f.name
+
+    # Ensure work directory exists on HPC
+    try:
+        client._run(f"mkdir -p {work_dir}")
+    except Exception as e:
+        st.warning(f"Could not create work directory {work_dir}: {e}")
+
+    remote_script = f"{work_dir}/{job_name}.sh"
+    sftp = client.ssh_client.open_sftp()
+    sftp.put(tmp_local, remote_script)
+    sftp.close()
+    os.remove(tmp_local)
+
+    # Submit job
+    result = client._run(f"sbatch {remote_script}")
+    job_id = result.strip().split()[-1]
+    
+    return [{"job_id": job_id, "command": command, "job_name": job_name, "remote_script": remote_script}]
 
 def submit_batch_apptainer_jobs(
     client,
@@ -423,7 +491,7 @@ with tab1:
     # Define available containers with their configurations
     CONTAINER_CONFIGS = {
         "DebugTest": {
-            "image_path": f"/home/{hpc_username}/repos/debug_test.sif",
+            "image_path": f"/home/{hpc_username}/repos/dev/debug_test.sif",
             "command_template": "python /app/test_script.py --input {input_file} --output {output_dir} --subject {subject} --session {session}",
             "input_type": "acquisition",
             "input_pattern": r".*_T2w\.nii\.gz$",
@@ -479,7 +547,7 @@ with tab1:
             "description": "Head circumference measurement (requires GAMBAS)"
         },
         "MRR": {
-            "image_path": f"/home/{hpc_username}/images/mrr.sif",
+            "image_path": f"/home/{hpc_username}/repos/mrr/mrr.sif",
             "command_template": "python /app/run_mrr.py --input {input_file} --output {output_dir}",
             "input_type": "acquisition",
             "input_pattern": r".*_T2w\.nii\.gz$",
@@ -505,6 +573,23 @@ with tab1:
             "default_gpus": 0,
             "default_time": "24:00:00",
             "description": "fMRI preprocessing pipeline"
+        },
+        "VBM_Pipeline": {
+            "image_path": None,  # Not used for script jobs
+            "command_template": "{script_path}/streamlit_vbm_wrapper.sh --bids_dir {bids_dir} --output_dir {output_dir}",
+            "input_type": "bids_root",
+            "input_pattern": None,
+            "input_subdir": None, 
+            "requires_derivative": None,
+            "output_name": "vbm_analysis",
+            "default_cpus": 8,
+            "default_mem": "32G",
+            "default_gpus": 0,
+            "default_time": "12:00:00",
+            "description": "VBM analysis pipeline using HPC SPM12/MATLAB modules",
+            "script_based": True,  # Flag for script jobs
+            "script_path": f"/home/{hpc_username}/repos/spm",
+            "modules_required": ["matlab", "spm"]
         }
     }
     
@@ -641,7 +726,7 @@ with tab1:
                 help="Temporary working directory for the job"
             )
             
-            default_log_dir = f"{bids_dir}/logs/{selected_container.lower()}"
+            default_log_dir = f"{bids_dir}/logs"
             output_log_dir = st.text_input(
                 "Log Directory",
                 value=default_log_dir,
@@ -681,35 +766,58 @@ with tab1:
             else:
                 try:
                     with st.spinner("Scanning BIDS directory and preparing jobs..."):
-                        job_list = submit_batch_apptainer_jobs(
-                            client=client,
-                            bids_dir=bids_dir,
-                            output_dir=output_dir,
-                            derivatives_dir=derivatives_dir if config["requires_derivative"] else None,
-                            subject_filter=subject_filter,
-                            session_filter=session_filter,
-                            container_config=config,
-                            selected_container=selected_container,
-                            cpus=cpus,
-                            mem=mem,
-                            gpus=gpus,
-                            time=time,
-                            partition=partition,
-                            work_dir=work_dir,
-                            output_log_dir=output_log_dir,
-                            bind_paths=bind_paths,
-                            custom_command=custom_command,
-                            dry_run=dry_run
-                        )
+                        if config.get("script_based", False):
+                            # Handle script-based job
+                            job_list = submit_batch_script_jobs(
+                                client=client,
+                                config=config,
+                                bids_dir=bids_dir,
+                                output_dir=output_dir,
+                                work_dir=work_dir,
+                                cpus=cpus,
+                                mem=mem,
+                                time=time
+                            )
+                        else:
+                            # Handle container-based job (existing logic)
+                            job_list = submit_batch_apptainer_jobs(
+                                client=client,
+                                bids_dir=bids_dir,
+                                output_dir=output_dir,
+                                derivatives_dir=derivatives_dir if config["requires_derivative"] else None,
+                                subject_filter=subject_filter,
+                                session_filter=session_filter,
+                                container_config=config,
+                                selected_container=selected_container,
+                                cpus=cpus,
+                                mem=mem,
+                                gpus=gpus,
+                                time=time,
+                                partition=partition,
+                                work_dir=work_dir,
+                                output_log_dir=output_log_dir,
+                                bind_paths=bind_paths,
+                                custom_command=custom_command,
+                                dry_run=dry_run
+                            )
                     
                     if not dry_run:
                         # Store jobs in session state
                         for job_info in job_list:
-                            st.session_state.job_history.append({
-                                "job_id": job_info["job_id"],
-                                "type": "Apptainer",
-                                "name": f"{selected_container}_{job_info['subject']}_{job_info.get('session', '')}"
-                            })
+                            if config.get("script_based", False):
+                                # Script-based jobs have different structure
+                                st.session_state.job_history.append({
+                                    "job_id": job_info["job_id"],
+                                    "type": "Script",
+                                    "name": job_info["job_name"]
+                                })
+                            else:
+                                # Container-based jobs
+                                st.session_state.job_history.append({
+                                    "job_id": job_info["job_id"],
+                                    "type": "Apptainer",
+                                    "name": f"{selected_container}_{job_info['subject']}_{job_info.get('session', '')}"
+                                })
                         
                         st.success(f"✅ Successfully submitted {len(job_list)} jobs")
                     else:
@@ -719,9 +827,15 @@ with tab1:
                     with st.expander("View Job Details", expanded=True):
                         for job_info in job_list:
                             if dry_run:
-                                st.write(f"**Would submit:** {job_info['subject']}/{job_info.get('session', 'N/A')}")
+                                if config.get("script_based", False):
+                                    st.write(f"**Would submit:** {job_info['job_name']}")
+                                else:
+                                    st.write(f"**Would submit:** {job_info['subject']}/{job_info.get('session', 'N/A')}")
                             else:
-                                st.write(f"**Job ID:** {job_info['job_id']} - {job_info['subject']}/{job_info.get('session', 'N/A')}")
+                                if config.get("script_based", False):
+                                    st.write(f"**Job ID:** {job_info['job_id']} - {job_info['job_name']}")
+                                else:
+                                    st.write(f"**Job ID:** {job_info['job_id']} - {job_info['subject']}/{job_info.get('session', 'N/A')}")
                             st.code(job_info['command'], language='bash')
                             st.divider()
                             
